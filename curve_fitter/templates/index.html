@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Curve Fitter</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', system-ui, sans-serif; max-width: 1100px; margin: 30px auto; padding: 20px; background-color: #f4f6f9; color: #212529; }
+        .dashboard-grid { display: flex; gap: 25px; flex-wrap: wrap; }
+        .control-panel { flex: 1; min-width: 380px; background: white; padding: 25px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+        textarea { width: 100%; font-family: 'Fira Code', monospace; padding: 12px; border: 1px solid #ced4da; border-radius: 6px; box-sizing: border-box; height: 200px; font-size: 13px; resize: vertical; }
+        button { width: 100%; padding: 14px; font-size: 16px; font-weight: 600; color: white; background-color: #0d6efd; border: none; border-radius: 6px; cursor: pointer; transition: background-color 0.15s ease-in-out; }
+        button:hover { background-color: #0b5ed7; }
+        #plot { width: 100%; height: 600px; margin-top: 25px; background: white; border-radius: 12px; padding: 15px; box-shadow: 0 4px 12px rgba(0,0,0,0.05); box-sizing: border-box; }
+        .metric-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px; }
+        .card { padding: 15px; border-radius: 8px; font-weight: 600; text-align: center; border: 1px solid #dee2e6; }
+        .card.train { background-color: #e8f5e9; color: #2e7d32; border-color: #c8e6c9; }
+        .card.val { background-color: #e3f2fd; color: #1565c0; border-color: #bbdefb; }
+        .card-val { font-size: 22px; font-weight: 700; margin-top: 5px; }
+        .results-box { background: #f8f9fa; padding: 20px; border-radius: 8px; border: 1px solid #e9ecef; }
+        code { background: #fff; padding: 8px 12px; border-radius: 6px; font-size: 15px; color: #d63384; display: block; margin-top: 8px; border: 1px solid #dee2e6; word-break: break-all; font-family: 'Fira Code', monospace;}
+        .feature-list { font-size: 13px; color: #495057; background: #eef2ff; padding: 12px; border-radius: 8px; margin-top: 12px; }
+        .export-bar { display:flex; gap:10px; margin-top:15px; flex-wrap:wrap; }
+        .export-btn { flex:1; min-width:150px; }
+        .loading { color:#0d6efd; font-weight:600; }
+    </style>
+</head>
+<body>
+
+    <h2 style="margin-bottom: 25px; color: #1e293b;">AI Curve Fitter</h2>
+    
+    <div class="dashboard-grid">
+        <div class="control-panel">
+            <label style="font-weight: 600; display: block; margin-bottom: 8px;">Input Data (X variables..., Target Y)</label>
+            <textarea id="points" placeholder="Paste columns here...">
+1, 2
+2, 3
+4, 5
+6, 7
+8, 9</textarea>
+            <span style="display:block; font-size:12px; color:#6c757d; margin: 6px 0 15px 0;">Supports math expressions (e.g., ln(2), sin(pi/4), e^2) alongside regular numbers.</span>
+            
+            <button onclick="executeDiscoveryPipeline()">Fit Equation</button>
+            <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;">
+                <input type="file" id="csvFile" accept=".csv,text/csv" onchange="loadCsvFile(event)">
+                <button type="button" style="width:auto;padding:10px 16px;" onclick="loadExampleData()">Load Example</button>
+            </div>
+            
+            <div style="margin-top: 20px;" id="metrics-region"></div>
+            <div id="results" class="results-box" style="display:none;"></div>
+            <div class="feature-list">
+                <b>Supported Model Families</b><br>
+                Linear, Polynomial, Sinusoidal, Exponential Features, Rational Features, Interaction Terms, Sparse Symbolic Regression.
+            </div>
+            <div class="export-bar">
+                <button class="export-btn" onclick="copyEquation()">Copy Equation</button>
+                <button class="export-btn" onclick="exportPythonModel()">Export Python</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="plot"></div>
+
+    <script>
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function evaluateExpression(str) {
+            if (!str || !str.trim()) return null;
+            if (!isNaN(str)) return Number(str); 
+            
+            let parsed = str.toLowerCase()
+                .replace(/ln\(/g, 'Math.log(')
+                .replace(/log\(/g, 'Math.log10(')
+                // Trig and hyperbolic functions, including reciprocals and arc variants, with word boundaries
+                .replace(/\barcsin\(/g, 'Math.asin(')
+                .replace(/\basin\(/g, 'Math.asin(')
+                .replace(/\barccos\(/g, 'Math.acos(')
+                .replace(/\bacos\(/g, 'Math.acos(')
+                .replace(/\barctan\(/g, 'Math.atan(')
+                .replace(/\batan\(/g, 'Math.atan(')
+                .replace(/\bsin\(/g, 'Math.sin(')
+                .replace(/\bcos\(/g, 'Math.cos(')
+                .replace(/\btan\(/g, 'Math.tan(')
+                .replace(/\bsec\(([^()]*)\)/g, '(1/Math.cos($1))')
+                .replace(/\bcosec\(([^()]*)\)/g, '(1/Math.sin($1))')
+                .replace(/\bcsc\(([^()]*)\)/g, '(1/Math.sin($1))')
+                .replace(/\bcot\(([^()]*)\)/g, '(1/Math.tan($1))')
+                .replace(/\bsinh\(/g, 'Math.sinh(')
+                .replace(/\bcosh\(/g, 'Math.cosh(')
+                .replace(/\btanh\(/g, 'Math.tanh(')
+                .replace(/\basinh\(/g, 'Math.asinh(')
+                .replace(/\bacosh\(/g, 'Math.acosh(')
+                .replace(/\batanh\(/g, 'Math.atanh(')
+                .replace(/sqrt\(/g, 'Math.sqrt(')
+                .replace(/exp\(/g, 'Math.exp(')
+                .replace(/\bpi\b/g, 'Math.PI')
+                .replace(/\be\b/g, 'Math.E')
+                .replace(/\^/g, '**'); 
+
+            try {
+                let val = new Function(`return ${parsed}`)();
+                return (val !== undefined && !isNaN(val) && isFinite(val)) ? val : null;
+            } catch (e) {
+                return null; 
+            }
+        }
+
+        function loadExampleData() {
+            document.getElementById('points').value = '1, 3\n2, 5\n3, 7\n4, 9\n5, 11';
+        }
+
+        function loadCsvFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                document.getElementById('points').value = String(e.target.result || '').trim();
+            };
+            reader.readAsText(file);
+        }
+
+        let latestEquation = '';
+
+        function copyEquation() {
+            if (!latestEquation) return;
+            navigator.clipboard.writeText(latestEquation);
+            alert('Equation copied to clipboard');
+        }
+
+        function exportPythonModel() {
+            if (!latestEquation) return;
+
+            let expr = latestEquation;
+            if (expr.includes('=')) {
+                expr = expr.split('=').slice(1).join('=').trim();
+            }
+
+            const code = `def model(x):\n    return ${expr}\n`;
+            const blob = new Blob([code], {type:'text/plain'});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'model.py';
+            a.click();
+        }
+
+        async function executeDiscoveryPipeline() {
+            const pointsText = document.getElementById('points').value;
+            if (!pointsText.trim()) {
+                alert('Please enter at least one row of data.');
+                return;
+            }
+            const resultsDiv = document.getElementById('results');
+            const metricsDiv = document.getElementById('metrics-region');
+            
+            resultsDiv.style.display = "block";
+            resultsDiv.innerHTML = '<span class="loading">Fitting model and evaluating candidate equations...</span>';
+
+            const lines = pointsText.trim().split('\n');
+            const points = [];
+            
+            for (let i = 0; i < lines.length; i++) {
+                let line = lines[i].trim();
+                if (!line) continue;
+                
+                let tokens = line.includes(',') ? line.split(',') : line.split(/\s+/);
+                let parsedRow = tokens.map(t => evaluateExpression(t.trim()));
+                
+                if (parsedRow.includes(null)) {
+                    resultsDiv.innerHTML = `<span style="color:#dc3545"><b>Syntax Error (Line ${i+1}):</b> Unable to parse mathematical expression: "${line}"</span>`;
+                    metricsDiv.innerHTML = "";
+                    return;
+                }
+                points.push(parsedRow);
+            }
+
+            if (points.length > 0) {
+                const standardWidth = points[0].length;
+                if (!points.every(row => row.length === standardWidth)) {
+                    resultsDiv.innerHTML = `<span style="color:#dc3545"><b>Matrix Dimension Fault:</b> Vector widths are jagged. Ensure columns align.</span>`;
+                    metricsDiv.innerHTML = "";
+                    return;
+                }
+            }
+
+            try {
+                const response = await fetch('/fit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ points: points })
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('Server response:', errorText);
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                let data;
+                try {
+                    data = await response.json();
+                } catch {
+                    throw new Error('Invalid JSON response from server');
+                }
+
+                if (data.error) {
+                    resultsDiv.innerHTML = `<span style="color:#dc3545"><b>Pipeline Failure:</b> ${data.error}</span>`;
+                    metricsDiv.innerHTML = "";
+                    return;
+                }
+
+                metricsDiv.innerHTML = `
+                    <div class="metric-cards">
+                        <div class="card train">Training R²<div class="card-val">${data.r2_train}</div></div>
+                        <div class="card val">Validation R²<div class="card-val">${data.r2_val}</div></div>
+                    </div>
+                `;
+
+                latestEquation = data.model_name || '';
+
+                resultsDiv.innerHTML = `
+                    <h4 style="margin: 0 0 8px 0; color: #0f172a;">Best-Fit Equation</h4>
+                    <code>${escapeHtml(data.model_name)}</code>
+                    <div style="margin-top:12px;font-size:13px;color:#475569;">
+                    </div>
+                `;
+
+                if (data.dimensions === 2) {
+                    const pts=(data.plot.raw_x||[]).map((x,i)=>({x:x,y:(data.actual||[])[i]})).sort((a,b)=>a.x-b.x);
+                    Plotly.newPlot('plot', [
+                        { x: pts.map(p=>p.x), y: pts.map(p=>p.y), mode: 'markers', type: 'scatter', name: 'Data Points', marker: {size: 10, color: '#1e293b'} },
+                        { x: data.plot.fit_x || [], y: data.plot.fit_y || [], mode: 'lines', type: 'scatter', name: 'Fitted Curve', line: {color: '#df4759', width: 3} }
+                    ], { title: 'Curve Fit', margin: {t:40} });
+
+                } else if (data.dimensions === 3) {
+                    Plotly.newPlot('plot', [
+                        { x: data.plot.raw_x, y: data.plot.raw_y, z: data.actual, mode: 'markers', type: 'scatter3d', name: 'Data Points', marker: {size: 6, color: '#000'} },
+                        { x: data.plot.fit_x, y: data.plot.fit_y, z: data.plot.fit_z, type: 'surface', name: 'Fitted Surface', colorscale: 'Cividis', opacity: 0.85 }
+                    ], { title: 'Surface Fit', margin: {t:40} });
+
+                } else {
+                    const actual = Array.isArray(data.actual) ? data.actual : [];
+                    const predicted = Array.isArray(data.predicted) ? data.predicted : [];
+                    if (!actual.length || !predicted.length) {
+                        throw new Error('Missing prediction data');
+                    }
+                    let maxVal = Math.max(...actual, ...predicted);
+                    let minVal = Math.min(...actual, ...predicted);
+
+                    const residuals = actual.map((v,i)=>v-predicted[i]);
+
+                    Plotly.newPlot('plot', [
+                        { x: data.actual, y: data.predicted, mode: 'markers', type: 'scatter', name: 'Model Predictions', marker: {size: 10, color: '#0d6efd'} },
+                        { x: data.actual, y: residuals, mode: 'markers', type: 'scatter', name: 'Residuals' },
+                        { x: [minVal, maxVal], y: [minVal, maxVal], mode: 'lines', type: 'scatter', name: 'Identity Line (y=x)', line: {color: '#198754', dash: 'dash', width: 2} }
+                    ], { 
+                        title: 'Prediction Quality',
+                        xaxis: { title: 'Actual Values' },
+                        yaxis: { title: 'Predicted Values' },
+                        margin: {t:40}
+                    });
+                }
+
+            } catch (err) {
+                console.error(err);
+                resultsDiv.innerHTML = `<span style="color:#dc3545"><b>Request Failed:</b><br>${escapeHtml(err.message || 'Unknown error')}</span>`;
+            }
+        }
+    </script>
+</body>
+</html>
